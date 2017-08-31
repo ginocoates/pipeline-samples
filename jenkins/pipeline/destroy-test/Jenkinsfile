@@ -1,0 +1,39 @@
+node('docker') {
+  try {
+    stage('Pull Source') {
+      notifyBuild('STARTED')
+      dir('tools') {
+        checkout([$class: 'GitSCM', branches: [[name: '*/master']], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'tools-deploy-key', url: 'git@github.com:tools-repo.git']]])
+      }
+    }
+    stage('Destroy Test Cluster') {
+      dir('tools/terraform') {
+        sh './orchestrate init appcluster-test ap-southeast-2'
+        sh './orchestrate destroy appcluster-test ap-southeast-2 -force'
+      }
+    }
+  } catch (e) {
+    currentBuild.result = "FAILED"
+    throw e
+  } finally {
+    notifyBuild(currentBuild.result)
+  }
+}
+
+def notifyBuild(String buildStatus = 'STARTED') {
+  buildStatus =  buildStatus ?: 'SUCCESSFUL'
+
+  def colorCode = '#FF0000'
+  def subject = "${buildStatus}: [#${env.BUILD_NUMBER}] ${env.JOB_NAME}"
+  def summary = "${subject} (${env.BUILD_URL})"
+
+  if (buildStatus == 'STARTED') {
+    colorCode = '#FFFF00'
+  } else if (buildStatus == 'SUCCESSFUL') {
+    colorCode = '#00FF00'
+  } else {
+    colorCode = '#FF0000'
+  }
+
+  slackSend (color: colorCode, message: summary)
+}

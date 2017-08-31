@@ -1,0 +1,67 @@
+node('docker') {
+  try {
+    stage('Pull Source') {
+      notifyBuild('STARTED')
+      dir('service1') {
+        checkout([$class: 'GitSCM', branches: [[name: '*/master']], poll: true, doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'service1-deploy-key', url: 'git@github.com:service1.git']]])
+        setDisplayName();
+      }
+    }
+    stage('Pull tools'){
+      dir('tools) {
+        checkout([$class: 'GitSCM', branches: [[name: '*/master']], poll: false, doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'MessageExclusion', excludedMessage: '.*']], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'tools-deploy-key', url: 'git@github.com:tools.git']]])
+      }
+    }
+    stage('Install Dependencies') {
+      dir('service1') {
+        sh 'yarn'
+      }
+    }
+    stage ('Unit/Integration Tests') {
+      //TODO: Run your tests etc
+    }
+    stage ('Publish Image') {
+      dir('tools/docker') {
+        sh "docker tag 99999999.dkr.ecr.ap-southeast-2.amazonaws.com/service1:latest 99999999.dkr.ecr.ap-southeast-2.amazonaws.com/service1:${env.BUILD_NUMBER}"
+        sh "docker push 99999999.dkr.ecr.ap-southeast-2.amazonaws.com/service1:${env.BUILD_NUMBER}"
+      }
+    }
+    stage ('Create artifact') {
+      dir('tools/output') {
+       sh 'mkdir -p output'
+       sh 'echo env.SERVICE1_BUILD=$BUILD_NUMBER > output/service1.env.groovy'
+       sh "echo env.SERVICE1_COMMIT_MSG=\\\"${currentBuild.displayName}\\\" >> output/service1.env.groovy"
+       archiveArtifacts artifacts: 'output/service1.env.groovy'
+     }
+    }
+  } catch (e) {
+    currentBuild.result = "FAILED"
+    throw e
+  } finally {
+    notifyBuild(currentBuild.result)
+  }
+}
+
+def setDisplayName(){
+  def comment = sh (script: "git log -1 --no-merges --format=%B", returnStdout: true,)
+  comment = comment.trim();
+  currentBuild.displayName = comment;
+}
+
+def notifyBuild(String buildStatus = 'STARTED') {
+  buildStatus =  buildStatus ?: 'SUCCESSFUL'
+
+  def colorCode = '#FF0000'
+  def subject = "${buildStatus}: [#${env.BUILD_NUMBER}] ${env.JOB_NAME}"
+  def summary = "${subject} (${env.BUILD_URL})"
+
+  if (buildStatus == 'STARTED') {
+    colorCode = '#FFFF00'
+  } else if (buildStatus == 'SUCCESSFUL') {
+    colorCode = '#00FF00'
+  } else {
+    colorCode = '#FF0000'
+  }
+
+  slackSend (color: colorCode, message: summary)
+}

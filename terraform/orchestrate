@@ -1,0 +1,110 @@
+#!/bin/bash
+
+set -exo pipefail
+
+function show_help {
+    echo -e " ./orchestrate cmd sourcefolder [region]
+e.g.
+./orchestrate plan global
+./orchestrate plan appcluster-test ap-southeast-2
+
+Before running your first plan or apply, run ./orchestrate init global to initialize the remote state.
+Ensure remote state is configured in ./config/[region]/[src]/tf-config.tf.
+
+This tool will use your default configured aws profile.
+It expects a key called bastion.pem to exist for all SSH file provisioning processes.
+"
+}
+
+cmd=$1
+src=$2
+
+if [ "$cmd" == "" ] || [ "$src" == "" ]; then
+    echo 'cmd and source folder is required'
+    show_help
+    exit 1
+fi
+
+if [ "$3" != "" ] && [ "$3" != "-var" ]; then
+    region=$3
+fi
+
+shift
+shift
+shift
+
+extra_vars_tmp=$@
+extra_vars=${extra_vars_tmp[@]}
+source_dir="$(pwd)/src/$src"
+modules_dir="$(pwd)/src/modules"
+config="$(pwd)/config/$src"
+ssh_dir=$(realpath ~/.ssh)
+aws_dir=$(realpath ~/.aws)
+private_key="$ssh_dir/bastion.pem"
+
+echo $cmd $src $region
+
+if [[ "$region" != "" ]] ; then
+    config="$(pwd)/config/$region/$src"
+fi
+
+# set using environment variables
+tf_user=$TF_USER
+
+tf_params=" -var-file=/src/variables.tfvars $extra_vars"
+
+if [ "$region" != "" ]; then
+    tf_params="$tf_params -var region=$region"
+fi
+
+echo $tf_params
+
+docker_opts="-w=/src \
+ -v $source_dir:/src \
+ -v $modules_dir:/modules \
+ -v $private_key:/private-key \
+ -v $config/variables.tfvars:/src/variables.tfvars \
+ -v $aws_dir:/home/$tf_user/.aws \
+ -v $config/tf-config.tf:/src/tf-config.tf"
+
+echo "building terrraform's docker image..."
+build_result=$(docker build -t orchestrate:latest \
+ --build-arg USER_ID=`id -u` \
+ --build-arg USER=$tf_user \
+ --build-arg GROUP_ID=`id -g` \
+ --build-arg GROUP=$tf_user \
+ .)
+
+if [ "$?" != 0 ]; then
+    printf "${build_result}"
+    echo "Error trying to build docker container"
+    exit $?
+fi
+
+echo "terraform's docker image is built!"
+
+if [ "$cmd" == "init" ]; then
+    docker run --rm \
+     $docker_opts \
+     orchstrate:latest \
+     init
+     exit 0
+elif [ "$cmd" == "plan-destroy" ]; then
+    docker run --rm \
+     $docker_opts \
+     orchestrate:latest \
+     plan -destroy $tf_params
+     exit 0
+fi
+
+echo 'getting modules'
+docker run --rm \
+ $docker_opts \
+ orchestrate:latest \
+ get
+
+echo 'executing command'
+docker run --rm \
+ $docker_opts \
+ orchestrate:latest \
+ $cmd $tf_params

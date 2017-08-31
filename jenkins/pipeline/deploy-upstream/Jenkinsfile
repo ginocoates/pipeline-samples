@@ -1,0 +1,104 @@
+node('docker') {
+  try {
+    stage('Validate Build'){
+      notifyBuild('STARTED')
+      validateLiveBuild()
+      if(!env.UPSTREAM_PROJECT || !env.CLUSTER_NAME){
+        error 'No upstream project or cluster specified. Set environment variables UPSTREAM_PROJECT and CLUSTER_NAME appropriately.'
+      }
+    }
+    stage('Pull Source') {
+      dir('tools') {
+        checkout([$class: 'GitSCM', branches: [[name: '*/master']], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'tools-deploy-key', url: 'git@github.com:tools-repo.git']]])
+      }
+    }
+    stage('Copy Artifacts') {
+      dir('tools/terraform') {
+        sh 'rm -rf import && mkdir -p import'
+        step ([
+          $class: 'CopyArtifact',
+          projectName: "${env.UPSTREAM_PROJECT}",
+          filter: 'output/*.env.groovy',
+          fingerprintArtifacts: true,
+          target: 'import',
+          flatten: true,
+          selector: [$class: 'SpecificBuildSelector', buildNumber: getBuildNumber(params.BUILD_TO_DEPLOY)]]);
+      }
+    }
+    stage('Load Environment'){
+      dir('tools/terraform') {
+        // allow build override
+        setEnvUpstreamBuild('SERVICE1_BUILD', 'import/service1.env.groovy', getBuildNumber(env.SERVICE1_BUILD_OVERRIDE))
+      }
+    }
+    stage('Deploy To Cluster') {
+      dir('tools/terraform') {
+        sh "./orchestrate init ${env.CLUSTER_NAME} ap-southeast-2"
+        sh "./orchestrate apply ${env.CLUSTER_NAME} ap-southeast-2 -var service1-build=${SERVICE1_BUILD}"
+      }
+    }
+    stage('Create Artifacts') {
+      dir('tools/terraform') {
+        sh 'mkdir -p output'
+        sh 'cp import/service1.env.groovy output/service1.env.groovy'
+        archiveArtifacts artifacts: 'output/*.env.groovy'
+      }
+    }
+    stage('Label Build') {
+      setDisplayName(params.BUILD_TO_DEPLOY);
+    }
+  } catch (e) {
+    currentBuild.result = "FAILED"
+    throw e
+  } finally {
+    notifyBuild(currentBuild.result)
+  }
+}
+
+def validateLiveBuild() {
+  if(env.CLUSTER_NAME == 'appcluster-live' && env.CONFIRM_DEPLOY != 'Yes'){
+    error "Need to confirm live deployment with 'Yes'";
+  }
+}
+
+def setEnvUpstreamBuild(String key, String envFile, String defaultBuild) {
+  def exists = fileExists envFile
+
+  if(!exists && !defaultBuild) {
+     error "envFile was not found and no defaultBuild supplied! Set ${key} environment variable appropriately"
+  }
+
+  if(!exists || defaultBuild){
+    sh "echo env.${key}=${defaultBuild} > ${envFile}"
+  }
+  load envFile
+}
+
+def setDisplayName(String selectedBuild){
+  def parts =  selectedBuild.split('-');
+  if(parts.length < 2) return;
+  currentBuild.displayName = parts[1];
+}
+
+def getBuildNumber(String selectedBuild) {
+  if(!selectedBuild) return selectedBuild;
+  return selectedBuild.split('-')[0];
+}
+
+def notifyBuild(String buildStatus = 'STARTED') {
+  buildStatus =  buildStatus ?: 'SUCCESSFUL'
+
+  def colorCode = '#FF0000'
+  def subject = "${buildStatus}: [#${env.BUILD_NUMBER}] ${env.JOB_NAME}"
+  def summary = "${subject} (${env.BUILD_URL})"
+
+  if (buildStatus == 'STARTED') {
+    colorCode = '#FFFF00'
+  } else if (buildStatus == 'SUCCESSFUL') {
+    colorCode = '#00FF00'
+  } else {
+    colorCode = '#FF0000'
+  }
+
+  slackSend (color: colorCode, message: summary)
+}

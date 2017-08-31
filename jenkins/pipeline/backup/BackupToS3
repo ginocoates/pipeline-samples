@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+
+# Generate timestamped filename
+TIMESTAMPED_TAG=`date +%Y-%m-%d-%H%M%S`
+BACKUP_ARCHIVE="./jenkins-backup-${TIMESTAMPED_TAG}.tar.gz"
+
+# Archive everything on jenkins
+# If the jenkins folder changes half way through, tar will fail; retry up to 5 times
+COUNTER=0
+
+until [ $COUNTER -ge 5 ]
+do
+    tar -czvf ${BACKUP_ARCHIVE} /var/jenkins_home && break
+
+    # If we get here, tar failed!
+    echo "Archive creation failed, retrying..."
+    COUNTER=$[$COUNTER+1]
+    sleep 15
+done
+
+# Place on s3 and cleanup
+aws s3 cp ${BACKUP_ARCHIVE} s3://${JENKINS_AWS_BACKUP_BUCKET_1} --sse-kms-key-id ${JENKINS_AWS_BACKUP_BUCKET_KMS_1} --sse aws:kms
+aws s3 cp ${BACKUP_ARCHIVE} s3://${JENKINS_AWS_BACKUP_BUCKET_2} --sse-kms-key-id ${JENKINS_AWS_BACKUP_BUCKET_KMS_2} --sse aws:kms
+
+rm ${BACKUP_ARCHIVE}

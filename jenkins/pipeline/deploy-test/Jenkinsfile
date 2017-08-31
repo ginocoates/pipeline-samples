@@ -1,0 +1,62 @@
+node('docker') {
+  try {
+    stage('Pull Source') {
+      notifyBuild('STARTED')
+      dir('tools') {
+        checkout([$class: 'GitSCM', branches: [[name: '*/master']], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'jenkins-infrastructure-deploy', url: 'git@github.com:tools-repo.git']]])
+      }
+    }
+    stage('Copy Artifacts'){
+      dir('tools') {
+        sh 'rm -rf import && mkdir -p import'
+
+        step ([
+          $class: 'CopyArtifact',
+          projectName: 'service-1',
+          filter: 'output/service1.env.groovy',
+          fingerprintArtifacts: true,
+          target: 'import',
+          flatten: true,
+          selector: [$class: 'StatusBuildSelector', stable: false]]);
+      }
+    }
+    stage('Deploy Cluster') {
+      dir('tools/terraform') {
+        load "import/service.env.groovy"
+        sh './orchestrate init appcluster-test ap-southeast-2'
+        sh "./orchestrate apply appcluster-test ap-southeast-2 -var service1-build=${env.SERVICE1_BUILD}"
+      }
+    }
+    stage('Create Artifacts') {
+      dir('tools/terraform') {
+        sh 'mkdir -p output'
+        sh 'cp import/service1.env.groovy output/service1.env.groovy'
+        archiveArtifacts artifacts: 'output/*.env.groovy'
+        currentBuild.displayName="${env.SERVICE1_COMMIT_MSG}"
+      }
+    }
+  } catch (e) {
+    currentBuild.result = "FAILED"
+    throw e
+  } finally {
+    notifyBuild(currentBuild.result)
+  }
+}
+
+def notifyBuild(String buildStatus = 'STARTED') {
+  buildStatus =  buildStatus ?: 'SUCCESSFUL'
+
+  def colorCode = '#FF0000'
+  def subject = "${buildStatus}: [#${env.BUILD_NUMBER}] ${env.JOB_NAME}"
+  def summary = "${subject} (${env.BUILD_URL})"
+
+  if (buildStatus == 'STARTED') {
+    colorCode = '#FFFF00'
+  } else if (buildStatus == 'SUCCESSFUL') {
+    colorCode = '#00FF00'
+  } else {
+    colorCode = '#FF0000'
+  }
+
+  slackSend (color: colorCode, message: summary)
+}
